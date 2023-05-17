@@ -1,6 +1,5 @@
 #include "server.h"
 #include <arpa/inet.h>
-#include <asm-generic/socket.h>
 #include <assert.h> // 断言
 #include <ctype.h>  // isxdigit()
 #include <dirent.h> // 遍历目录
@@ -15,6 +14,13 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
+
+struct FDInfo {
+    int fd;
+    int epfd;
+    pthread_t tid;
+};
 
 /*********************** initListenFd() *********************/
 int initListenFd(unsigned short port) {
@@ -90,12 +96,17 @@ int epollRun(int lfd) {
 
     for (int i = 0; i < num; ++i) {
       int fd = evs[i].data.fd;
+      struct FDInfo* info = (struct FDInfo*)malloc(sizeof(struct FDInfo));
+      info->epfd = epfd;
+      info->fd = fd;
       if (fd == lfd) {
         // 建立新连接
-        acceptClient(epfd, lfd);
+        // acceptClient(epfd, lfd);
+        pthread_create(&info->tid, NULL, acceptClient, info);
       } else {
         // 接收对端的数据
-        recvHttpRequest(epfd, fd);
+        // recvHttpRequest(epfd, fd);
+        pthread_create(&info->tid, NULL, recvHttpRequest, info);
       }
     }
   }
@@ -104,12 +115,13 @@ int epollRun(int lfd) {
 }
 
 /*********************** acceptClient() *********************/
-int acceptClient(int epfd, int lfd) {
+void* acceptClient(void* arg) {
+  struct FDInfo* info = (struct FDInfo*)arg;
   // 和客户端建立连接
-  int cfd = accept(lfd, NULL, NULL);
+  int cfd = accept(info->fd, NULL, NULL);
   if (-1 == cfd) {
     perror("accept error!");
-    return -1;
+    exit(-1);
   }
 
   // 设置非阻塞
@@ -122,17 +134,23 @@ int acceptClient(int epfd, int lfd) {
   ev.events = EPOLLIN | EPOLLET; // 边沿非阻塞模式
 
   // 将新建立连接的通信文件描述符挂在红黑树上
-  int misJudgment = epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+  int misJudgment = epoll_ctl(info->epfd, EPOLL_CTL_ADD, cfd, &ev);
   if (-1 == misJudgment) {
     perror("epoll_ctl ADD cfd error!");
-    return -1;
+    exit(-1);
   }
 
-  return 0;
+  printf("accept %ld\n", pthread_self());
+  pthread_detach(info->tid);
+  free(info);
+  info = NULL;
+  arg = NULL;
+  return NULL;
 }
 
 /*********************** recvHttpRequest() *********************/
-int recvHttpRequest(int epfd, int cfd) {
+void* recvHttpRequest(void* arg) {
+  struct FDInfo* info = (struct FDInfo*)arg;
 
   printf("开始接收数据了\n");
 
@@ -143,7 +161,7 @@ int recvHttpRequest(int epfd, int cfd) {
 
   // 循环接收数据
   while (1) {
-    len = recv(cfd, tmp, sizeof(tmp), 0);
+    len = recv(info->fd, tmp, sizeof(tmp), 0);
     if (len <= 0) {
       break;
     }
@@ -161,21 +179,26 @@ int recvHttpRequest(int epfd, int cfd) {
     char *pt = strstr(buf, "\r\n"); // pt指向'\r'的位置
     int reqLen = pt - buf;          // 得到请求行的长度
     buf[reqLen] = '\0';
-    parseRequestLine(buf, cfd);
+    parseRequestLine(buf, info->fd);
   } else if (0 == len) {
     // 客户断开了连接
-    int misJudgment = epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
+    int misJudgment = epoll_ctl(info->epfd, EPOLL_CTL_DEL, info->fd, NULL);
     if (-1 == misJudgment) {
       perror("epoll_ctl DEL cfd error!");
-      return -1;
+      exit(-1);
     }
 
-    close(cfd);
+    close(info->fd);
   } else {
     perror("recvHttpRequest recv error!");
-    return -1;
+    exit(-1);
   }
 
+  printf("recvMsg %ld\n", pthread_self());
+  pthread_detach(info->tid);
+  free(info);
+  info = NULL;
+  arg = NULL;
   return 0;
 }
 

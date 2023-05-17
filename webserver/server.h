@@ -8,10 +8,10 @@ int initListenFd(unsigned short port);
 int epollRun(int lfd);
 
 // 和客户端建立连接的函数
-int acceptClient(int epfd, int lfd);
+void* acceptClient(void* arg);
 
 // 接收 http 请求
-int recvHttpRequest(int epfd, int cfd);
+void* recvHttpRequest(void* arg);
 
 // 解析 http 请求协议行
 // 请求行对应的字符串 用于通信的文件描述符
